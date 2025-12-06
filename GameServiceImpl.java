@@ -17,13 +17,13 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
     private String playerX = null;
     private String playerO = null;
 
-    // Чей сейчас ход: 'X' или 'O'
+    // чей сейчас ход: 'X' или 'O'
     private char currentPlayer = 'X';
 
-    // Сколько "ходиков" осталось у игрока в текущем ходу
+    // сколько "ходиков" осталось у игрока в текущем ходу
     private final Map<String, Integer> actionsLeft = new HashMap<>();
 
-    // Был ли пас вынужденным (нет возможных ходов)
+    // был ли пас вынужденным (нет возможных ходов)
     private final Map<String, Boolean> forcedPass = new HashMap<>();
 
     private boolean gameStarted = false;
@@ -38,13 +38,9 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         }
     }
 
-    // ---------------------------------------------------------
-    // RMI-методы интерфейса
-    // ---------------------------------------------------------
-
     @Override
     public synchronized char join(String playerId) throws RemoteException {
-        // Первый подключившийся — X
+        // первый подключившийся — X
         if (playerX == null) {
             playerX = playerId;
             actionsLeft.put(playerId, 0);       // до старта игры ходов нет
@@ -53,7 +49,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
             return 'X';
         }
 
-        // Второй — O, после этого игра стартует, ходят крестики
+        // второй — O, после этого игра стартует, ходят крестики
         if (playerO == null) {
             playerO = playerId;
             forcedPass.put(playerId, false);
@@ -110,12 +106,20 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
             default:
                 return false;
         }
-
         // игрок сделал реальное действие — это точно не пас
         forcedPass.put(playerId, false);
 
         // уменьшаем число оставшихся ходиков
         actionsLeft.put(playerId, left - 1);
+
+        // после любого действия проверяем победителя по состоянию доски
+        char w = checkWinner();
+        if (w != '.') {
+            // кто-то выиграл или зафиксировалась ничья по уничтожению обоих
+            gameOver = true;
+            gameWinner = w;
+            return true;
+        }
 
         // если ходики кончились — конец хода
         checkEndTurn(playerId);
@@ -133,26 +137,34 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
 
         int left = actionsLeft.getOrDefault(playerId, 0);
 
-        // Если уже сделаны 1–2 "ходика", пасить можно только если ходов больше нет
+        // уже сделаны 1–2 "ходика", пасить можно только если ходов больше нет
         if (left < ACTIONS_PER_TURN && left > 0) {
             if (canPlayerMakeAnyAction(symbol)) {
-                // есть возможные действия — по правилам нельзя завершать ход раньше 3
+                // есть возможные действия, нельзя завершать ход раньше 3
                 return false;
             }
-            // форсированный пас
+            // продолжать ход невозможно
             forcedPass.put(playerId, true);
+
         } else if (left == ACTIONS_PER_TURN) {
-            // отказ от целого хода без единого "ходика" — не форсированный пас
-            forcedPass.put(playerId, false);
+            // игрок ещё не сделал ни одного "ходика" в этом ходу
+            if (canPlayerMakeAnyAction(symbol)) {
+                // можно ходить, но игрок отказывается
+                forcedPass.put(playerId, false);
+            } else {
+                // даже первый "ходик" сделать невозможно
+                forcedPass.put(playerId, true);
+            }
+
         } else if (left == 0) {
-            // ход уже по сути закончился, пасить нельзя
+            // ход уже закончился, пасить нельзя
             return false;
         }
 
         // игрок больше не ходит в этом ходу
         actionsLeft.put(playerId, 0);
 
-        // если оба игрока форсированно пасовали — ничья
+        // если оба игрока пасовали — ничья
         if (bothPlayersForcedPass()) {
             gameOver = true;
             gameWinner = 'D';
@@ -181,7 +193,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
     public synchronized char checkWinner() throws RemoteException {
         if (!gameStarted) return '.';
 
-        // ничья по двойному форс-пасу
+        // ничья по двойному пасу
         if (gameOver && gameWinner == 'D') {
             return 'D';
         }
@@ -207,7 +219,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         if (oDestroyed && !xDestroyed) return 'X';
         if (xDestroyed && !oDestroyed) return 'O';
 
-        // редкий случай, когда обе колонии уничтожены – можно трактовать как ничью
+        // обе колонии уничтожены можно трактовать как ничью
         if (xDestroyed && oDestroyed) return 'D';
 
         // игра продолжается
@@ -216,8 +228,8 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
 
     @Override
     public synchronized boolean isGameOver() throws RemoteException {
-        // Игра окончена, если уже зафиксирован результат
-        // либо если по текущему состоянию видно, что у кого-то не осталось живых
+        // игра окончена, если уже есть результат
+        // или видно, что у кого-то не осталось живых
         char w = checkWinner();
         return w != '.';
     }
@@ -231,10 +243,6 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
     public synchronized boolean isGameStarted() throws RemoteException {
         return gameStarted;
     }
-
-    // ---------------------------------------------------------
-    // Вспомогательные методы логики игры
-    // ---------------------------------------------------------
 
     private String currentPlayerId() {
         return (currentPlayer == 'X') ? playerX : playerO;
@@ -273,18 +281,18 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         return false;
     }
 
-    // Проверка, есть ли у игрока хотя бы одно возможное действие (PLACE или KILL)
+    // есть ли у игрока хотя бы одно возможное действие (PLACE или KILL)
     private boolean canPlayerMakeAnyAction(char symbol) {
         char enemy = opponentOf(symbol);
 
-        // Стартовое исключение: если у игрока нет живых фишек,
+        // если у игрока нет живых фишек,
         // он всегда может поставить первую на свою стартовую клетку, если она свободна
         if (!hasAlive(symbol)) {
             if (symbol == 'X' && board[0][0] == '.') return true;
             if (symbol == 'O' && board[SIZE - 1][SIZE - 1] == '.') return true;
         }
 
-        // Любая доступная пустая клетка для PLACE
+        // любая доступная пустая клетка для PLACE
         for (int i = 0; i < SIZE; i++) {
             for (int j = 0; j < SIZE; j++) {
                 if (board[i][j] == '.' && isCellAccessibleForPlace(i, j, symbol)) {
@@ -293,7 +301,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
             }
         }
 
-        // Любая доступная вражеская живая клетка для KILL
+        // любая доступная вражеская живая клетка для KILL
         for (int i = 0; i < SIZE; i++) {
             for (int j = 0; j < SIZE; j++) {
                 if (board[i][j] == enemy && isCellAccessibleForPlace(i, j, symbol)) {
@@ -305,7 +313,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         return false;
     }
 
-    // Логика окончания хода (после трёх ходиков)
+    // после трёх ходиков
     private void checkEndTurn(String playerId) {
         int left = actionsLeft.getOrDefault(playerId, 0);
         if (left <= 0) {
@@ -313,7 +321,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         }
     }
 
-    // Переключение хода между X и O
+    // переключение хода между X и O
     private void endTurn() {
         if (gameOver) return;
 
@@ -324,17 +332,13 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
         }
     }
 
-    // Оба игрока вынужденно пасовали (нет возможных ходов)
+    // оба игрока пасовали (нет возможных ходов)
     private boolean bothPlayersForcedPass() {
         if (playerX == null || playerO == null) return false;
         Boolean fx = forcedPass.get(playerX);
         Boolean fo = forcedPass.get(playerO);
         return Boolean.TRUE.equals(fx) && Boolean.TRUE.equals(fo);
     }
-
-    // ---------------------------------------------------------
-    // Доступность клетки по правилам
-    // ---------------------------------------------------------
 
     /**
      * Клетка доступна для символа symbol ('X' или 'O'), если:
@@ -345,13 +349,13 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
     private boolean isCellAccessibleForPlace(int row, int col, char symbol) {
         if (!inBounds(row, col)) return false;
 
-        // Старт: первая фишка игрока
+        // Старт первая фишка игрока
         if (!hasAlive(symbol)) {
             if (symbol == 'X' && row == 0 && col == 0 && board[0][0] == '.') return true;
             if (symbol == 'O' && row == SIZE - 1 && col == SIZE - 1 && board[SIZE - 1][SIZE - 1] == '.') return true;
         }
 
-        // Прямое соприкосновение с живой своей фишкой
+        // соприкосновение с живой своей фишкой
         for (int dr = -1; dr <= 1; dr++) {
             for (int dc = -1; dc <= 1; dc++) {
                 if (dr == 0 && dc == 0) continue;
@@ -362,16 +366,11 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
             }
         }
 
-        // Иначе проверяем достижимость через цепочку убитых вражеских
+        // достижимость через цепочку убитых вражеских
         boolean[][] visited = new boolean[SIZE][SIZE];
         return accessibleThroughKilledChain(row, col, symbol, visited);
     }
 
-
-    /**
-     * DFS/BFS по цепочке убитых вражеских фишек.
-     * Разрешаем ходить только по клеткам с убитыми врагами и проверяем, рядом ли живой свой символ.
-     */
     private boolean accessibleThroughKilledChain(int row, int col, char symbol, boolean[][] visited) {
         if (!inBounds(row, col) || visited[row][col]) return false;
         visited[row][col] = true;
@@ -390,7 +389,7 @@ public class GameServiceImpl extends UnicastRemoteObject implements GameService 
             }
         }
 
-        // Иначе идём дальше по убитым вражеским
+        // идём дальше по убитым вражеским
         for (int dr = -1; dr <= 1; dr++) {
             for (int dc = -1; dc <= 1; dc++) {
                 if (dr == 0 && dc == 0) continue;
