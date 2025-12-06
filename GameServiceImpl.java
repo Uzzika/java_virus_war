@@ -2,77 +2,407 @@ package org.example;
 
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
 public class GameServiceImpl extends UnicastRemoteObject implements GameService {
 
-    private static final int SIZE = 3;
+    private static final int SIZE = 10;
+    private static final int ACTIONS_PER_TURN = 3;
+
+    // '.' — пусто, 'X'/'O' — живые, 'x'/'o' — убитые
     private final char[][] board = new char[SIZE][SIZE];
-    private final Map<String, Character> players = new HashMap<>();
-    private char currentTurn = 'X';
+
+    private String playerX = null;
+    private String playerO = null;
+
+    // Чей сейчас ход: 'X' или 'O'
+    private char currentPlayer = 'X';
+
+    // Сколько "ходиков" осталось у игрока в текущем ходу
+    private final Map<String, Integer> actionsLeft = new HashMap<>();
+
+    // Был ли пас вынужденным (нет возможных ходов)
+    private final Map<String, Boolean> forcedPass = new HashMap<>();
+
+    private boolean gameStarted = false;
+    private boolean gameOver = false;
+    // 'X', 'O', 'D' (ничья) или '.' если ещё не определён
+    private char gameWinner = '.';
 
     public GameServiceImpl() throws RemoteException {
         super();
-
-        // заполнить поле точками
-        for (int i = 0; i < SIZE; i++)
-            for (int j = 0; j < SIZE; j++)
-                board[i][j] = '.';
+        for (int i = 0; i < SIZE; i++) {
+            Arrays.fill(board[i], '.');
+        }
     }
+
+    // ---------------------------------------------------------
+    // RMI-методы интерфейса
+    // ---------------------------------------------------------
 
     @Override
     public synchronized char join(String playerId) throws RemoteException {
-        if (players.size() >= 2) return 0; // места нет
+        // Первый подключившийся — X
+        if (playerX == null) {
+            playerX = playerId;
+            actionsLeft.put(playerId, 0);       // до старта игры ходов нет
+            forcedPass.put(playerId, false);
+            System.out.println("Player joined as X: " + playerId);
+            return 'X';
+        }
 
-        char sym = players.isEmpty() ? 'X' : 'O';
-        players.put(playerId, sym);
-        return sym;
+        // Второй — O, после этого игра стартует, ходят крестики
+        if (playerO == null) {
+            playerO = playerId;
+            forcedPass.put(playerId, false);
+            gameStarted = true;
+            currentPlayer = 'X';
+            // X получает первый ход: 3 "ходика"
+            if (playerX != null) {
+                actionsLeft.put(playerX, ACTIONS_PER_TURN);
+            }
+            actionsLeft.put(playerO, 0);
+            System.out.println("Player joined as O: " + playerId + ". Game started.");
+            return 'O';
+        }
+
+        // Больше двух игроков не принимаем
+        return 0;
     }
 
     @Override
-    public synchronized boolean makeMove(String playerId, int r, int c) throws RemoteException {
-        if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return false;
+    public synchronized boolean makeAction(String playerId, Action action) throws RemoteException {
+        if (!gameStarted || gameOver) return false;
 
-        char symbol = players.get(playerId);
-        if (symbol != currentTurn) return false;       // не его ход
-        if (board[r][c] != '.') return false;          // занято
+        // ход может делать только текущий игрок
+        if (!playerId.equals(currentPlayerId())) return false;
 
-        board[r][c] = symbol;
+        char symbol = playerIdToMark(playerId);
+        if (symbol == 0) return false;
 
-        // смена хода
-        currentTurn = (currentTurn == 'X' ? 'O' : 'X');
+        int left = actionsLeft.getOrDefault(playerId, 0);
+        if (left <= 0) return false; // ходики закончились
+
+        int r = action.row;
+        int c = action.col;
+
+        if (!inBounds(r, c)) return false;
+
+        char enemy = opponentOf(symbol);
+
+        switch (action.type) {
+            case PLACE:
+                // можно ставить только в пустую и ДОСТУПНУЮ клетку
+                if (board[r][c] != '.') return false;
+                if (!isCellAccessibleForPlace(r, c, symbol)) return false;
+                board[r][c] = symbol;
+                break;
+
+            case KILL:
+                // можно убивать только живой символ противника на ДОСТУПНОЙ клетке
+                if (board[r][c] != enemy) return false;
+                if (!isCellAccessibleForPlace(r, c, symbol)) return false;
+                board[r][c] = Character.toLowerCase(enemy); // убитый
+                break;
+
+            default:
+                return false;
+        }
+
+        // игрок сделал реальное действие — это точно не пас
+        forcedPass.put(playerId, false);
+
+        // уменьшаем число оставшихся ходиков
+        actionsLeft.put(playerId, left - 1);
+
+        // если ходики кончились — конец хода
+        checkEndTurn(playerId);
+        return true;
+    }
+
+    @Override
+    public synchronized boolean passTurn(String playerId) throws RemoteException {
+        if (!gameStarted || gameOver) return false;
+
+        if (!playerId.equals(currentPlayerId())) return false;
+
+        char symbol = playerIdToMark(playerId);
+        if (symbol == 0) return false;
+
+        int left = actionsLeft.getOrDefault(playerId, 0);
+
+        // Если уже сделаны 1–2 "ходика", пасить можно только если ходов больше нет
+        if (left < ACTIONS_PER_TURN && left > 0) {
+            if (canPlayerMakeAnyAction(symbol)) {
+                // есть возможные действия — по правилам нельзя завершать ход раньше 3
+                return false;
+            }
+            // форсированный пас
+            forcedPass.put(playerId, true);
+        } else if (left == ACTIONS_PER_TURN) {
+            // отказ от целого хода без единого "ходика" — не форсированный пас
+            forcedPass.put(playerId, false);
+        } else if (left == 0) {
+            // ход уже по сути закончился, пасить нельзя
+            return false;
+        }
+
+        // игрок больше не ходит в этом ходу
+        actionsLeft.put(playerId, 0);
+
+        // если оба игрока форсированно пасовали — ничья
+        if (bothPlayersForcedPass()) {
+            gameOver = true;
+            gameWinner = 'D';
+            return true;
+        }
+
+        endTurn();
         return true;
     }
 
     @Override
     public synchronized char[][] getBoard() throws RemoteException {
-        return board;
+        char[][] copy = new char[SIZE][SIZE];
+        for (int i = 0; i < SIZE; i++) {
+            System.arraycopy(board[i], 0, copy[i], 0, SIZE);
+        }
+        return copy;
     }
 
     @Override
-    public synchronized char currentTurn() throws RemoteException {
-        return currentTurn;
+    public synchronized char getCurrentPlayer() throws RemoteException {
+        return currentPlayer;
     }
 
     @Override
     public synchronized char checkWinner() throws RemoteException {
-        // строки
-        for (int i = 0; i < SIZE; i++) {
-            if (board[i][0] != '.' && board[i][0] == board[i][1] && board[i][1] == board[i][2])
-                return board[i][0];
-        }
-        // колонки
-        for (int i = 0; i < SIZE; i++) {
-            if (board[0][i] != '.' && board[0][i] == board[1][i] && board[1][i] == board[2][i])
-                return board[0][i];
-        }
-        // диагонали
-        if (board[0][0] != '.' && board[0][0] == board[1][1] && board[1][1] == board[2][2])
-            return board[0][0];
-        if (board[0][2] != '.' && board[0][2] == board[1][1] && board[1][1] == board[2][0])
-            return board[0][2];
+        if (!gameStarted) return '.';
 
-        return '.'; // победителя нет
+        // ничья по двойному форс-пасу
+        if (gameOver && gameWinner == 'D') {
+            return 'D';
+        }
+
+        int aliveX = 0, aliveO = 0;
+        int deadX = 0, deadO = 0;
+
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                char cell = board[r][c];
+                if (cell == 'X') aliveX++;
+                else if (cell == 'O') aliveO++;
+                else if (cell == 'x') deadX++;
+                else if (cell == 'o') deadO++;
+            }
+        }
+
+        // X победил: у O нет живых, но есть хотя бы одна убитая фишка O
+        boolean oDestroyed = (aliveO == 0 && deadO > 0);
+        // O победил: у X нет живых, но есть хотя бы одна убитая фишка X
+        boolean xDestroyed = (aliveX == 0 && deadX > 0);
+
+        if (oDestroyed && !xDestroyed) return 'X';
+        if (xDestroyed && !oDestroyed) return 'O';
+
+        // редкий случай, когда обе колонии уничтожены – можно трактовать как ничью
+        if (xDestroyed && oDestroyed) return 'D';
+
+        // игра продолжается
+        return '.';
+    }
+
+    @Override
+    public synchronized boolean isGameOver() throws RemoteException {
+        // Игра окончена, если уже зафиксирован результат
+        // либо если по текущему состоянию видно, что у кого-то не осталось живых
+        char w = checkWinner();
+        return w != '.';
+    }
+
+    @Override
+    public synchronized int getActionsLeft(String playerId) throws RemoteException {
+        return actionsLeft.getOrDefault(playerId, 0);
+    }
+
+    @Override
+    public synchronized boolean isGameStarted() throws RemoteException {
+        return gameStarted;
+    }
+
+    // ---------------------------------------------------------
+    // Вспомогательные методы логики игры
+    // ---------------------------------------------------------
+
+    private String currentPlayerId() {
+        return (currentPlayer == 'X') ? playerX : playerO;
+    }
+
+    private char playerIdToMark(String playerId) {
+        if (playerId == null) return 0;
+        if (playerId.equals(playerX)) return 'X';
+        if (playerId.equals(playerO)) return 'O';
+        return 0;
+    }
+
+    private char opponentOf(char symbol) {
+        return (symbol == 'X') ? 'O' : 'X';
+    }
+
+    private boolean inBounds(int r, int c) {
+        return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+    }
+
+    private boolean isBoardEmpty() {
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] != '.') return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasAlive(char symbol) {
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (board[r][c] == symbol) return true;
+            }
+        }
+        return false;
+    }
+
+    // Проверка, есть ли у игрока хотя бы одно возможное действие (PLACE или KILL)
+    private boolean canPlayerMakeAnyAction(char symbol) {
+        char enemy = opponentOf(symbol);
+
+        // Стартовое исключение: если у игрока нет живых фишек,
+        // он всегда может поставить первую на свою стартовую клетку, если она свободна
+        if (!hasAlive(symbol)) {
+            if (symbol == 'X' && board[0][0] == '.') return true;
+            if (symbol == 'O' && board[SIZE - 1][SIZE - 1] == '.') return true;
+        }
+
+        // Любая доступная пустая клетка для PLACE
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == '.' && isCellAccessibleForPlace(i, j, symbol)) {
+                    return true;
+                }
+            }
+        }
+
+        // Любая доступная вражеская живая клетка для KILL
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < SIZE; j++) {
+                if (board[i][j] == enemy && isCellAccessibleForPlace(i, j, symbol)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // Логика окончания хода (после трёх ходиков)
+    private void checkEndTurn(String playerId) {
+        int left = actionsLeft.getOrDefault(playerId, 0);
+        if (left <= 0) {
+            endTurn();
+        }
+    }
+
+    // Переключение хода между X и O
+    private void endTurn() {
+        if (gameOver) return;
+
+        currentPlayer = opponentOf(currentPlayer);
+        String nextId = currentPlayerId();
+        if (nextId != null) {
+            actionsLeft.put(nextId, ACTIONS_PER_TURN);
+        }
+    }
+
+    // Оба игрока вынужденно пасовали (нет возможных ходов)
+    private boolean bothPlayersForcedPass() {
+        if (playerX == null || playerO == null) return false;
+        Boolean fx = forcedPass.get(playerX);
+        Boolean fo = forcedPass.get(playerO);
+        return Boolean.TRUE.equals(fx) && Boolean.TRUE.equals(fo);
+    }
+
+    // ---------------------------------------------------------
+    // Доступность клетки по правилам
+    // ---------------------------------------------------------
+
+    /**
+     * Клетка доступна для символа symbol ('X' или 'O'), если:
+     * 1) это стартовое исключение (первая фишка X на (0,0), O на (9,9) при пустой доске), или
+     * 2) она соседствует (8 направлений) с живым своим символом, или
+     * 3) до неё можно добраться через цепочку убитых вражеских фишек.
+     */
+    private boolean isCellAccessibleForPlace(int row, int col, char symbol) {
+        if (!inBounds(row, col)) return false;
+
+        // Старт: первая фишка игрока
+        if (!hasAlive(symbol)) {
+            if (symbol == 'X' && row == 0 && col == 0 && board[0][0] == '.') return true;
+            if (symbol == 'O' && row == SIZE - 1 && col == SIZE - 1 && board[SIZE - 1][SIZE - 1] == '.') return true;
+        }
+
+        // Прямое соприкосновение с живой своей фишкой
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = row + dr;
+                int nc = col + dc;
+                if (!inBounds(nr, nc)) continue;
+                if (board[nr][nc] == symbol) return true;
+            }
+        }
+
+        // Иначе проверяем достижимость через цепочку убитых вражеских
+        boolean[][] visited = new boolean[SIZE][SIZE];
+        return accessibleThroughKilledChain(row, col, symbol, visited);
+    }
+
+
+    /**
+     * DFS/BFS по цепочке убитых вражеских фишек.
+     * Разрешаем ходить только по клеткам с убитыми врагами и проверяем, рядом ли живой свой символ.
+     */
+    private boolean accessibleThroughKilledChain(int row, int col, char symbol, boolean[][] visited) {
+        if (!inBounds(row, col) || visited[row][col]) return false;
+        visited[row][col] = true;
+
+        char enemy = opponentOf(symbol);
+        char deadEnemy = Character.toLowerCase(enemy);
+
+        // Если рядом живой свой символ — доступно
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = row + dr;
+                int nc = col + dc;
+                if (!inBounds(nr, nc)) continue;
+                if (board[nr][nc] == symbol) return true;
+            }
+        }
+
+        // Иначе идём дальше по убитым вражеским
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = row + dr;
+                int nc = col + dc;
+                if (!inBounds(nr, nc)) continue;
+                if (board[nr][nc] == deadEnemy && !visited[nr][nc]) {
+                    if (accessibleThroughKilledChain(nr, nc, symbol, visited)) return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

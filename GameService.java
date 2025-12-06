@@ -5,8 +5,12 @@ import java.rmi.RemoteException;
 
 public interface GameService extends Remote {
     char join(String playerId) throws RemoteException;
-    boolean makeMove(String playerId, int r, int c) throws RemoteException; // <-- добавили playerId
+    boolean makeAction(String playerId, Action action) throws RemoteException;
+    boolean passTurn(String playerId) throws RemoteException;
     char[][] getBoard() throws RemoteException;
-    char currentTurn() throws RemoteException;
+    char getCurrentPlayer() throws RemoteException;
     char checkWinner() throws RemoteException;
+    boolean isGameOver() throws RemoteException;
+    int getActionsLeft(String playerId) throws RemoteException;
+    boolean isGameStarted() throws RemoteException;
 }
